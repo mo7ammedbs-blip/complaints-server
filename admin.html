@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>لوحة تحكم المستر أحمد هواش 👑</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #0f111a;
+            --card-bg: #161925;
+            --primary: #ffc107;
+            --text: #ffffff;
+            --text-muted: #a0aec0;
+            --danger: #e53e3e;
+            --success: #38a169;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Cairo', sans-serif; }
+        body { background-color: var(--bg-dark); color: var(--text); padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; border-bottom: 2px solid var(--card-bg); padding-bottom: 15px; }
+        h1 { color: var(--primary); font-size: 24px; }
+        
+        /* بوابه الدخول الحامية */
+        #auth-gate { position: fixed; top:0; left:0; width:100%; height:100%; background: var(--bg-dark); display: flex; justify-content: center; align-items: center; z-index: 9999; }
+        .login-box { background: var(--card-bg); padding: 30px; border-radius: 12px; border: 1px solid var(--primary); text-align: center; width: 90%; max-width: 400px; }
+        input, select, textarea { width: 100%; padding: 12px; margin: 10px 0; background: #1f2335; border: 1px solid #2d324d; color: #fff; border-radius: 8px; }
+        button { background: var(--primary); color: #000; border: none; padding: 12px 25px; font-weight: bold; border-radius: 8px; cursor: pointer; width: 100%; transition: 0.3s; }
+        button:hover { opacity: 0.9; }
+
+        /* الإحصائيات */
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-bottom: 30px; }
+        .stat-card { background: var(--card-bg); padding: 20px; border-radius: 10px; border-right: 4px solid var(--primary); }
+        .stat-card h3 { color: var(--text-muted); font-size: 14px; }
+        .stat-card p { font-size: 28px; font-weight: bold; margin-top: 5px; }
+
+        /* الأقسام والروافع */
+        .grid-sections { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 25px; margin-bottom: 40px; }
+        .section-card { background: var(--card-bg); padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.2); }
+        .section-card h2 { font-size: 18px; margin-bottom: 15px; color: var(--primary); border-bottom: 1px solid #2d324d; padding-bottom: 8px; }
+
+        /* الجداول واستعراض البيانات */
+        .data-table-container { background: var(--card-bg); padding: 20px; border-radius: 12px; margin-bottom: 30px; overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; text-align: right; min-width: 600px; }
+        th, td { padding: 12px; border-bottom: 1px solid #2d324d; }
+        th { color: var(--primary); }
+        .btn-sm { padding: 5px 10px; font-size: 12px; width: auto; display: inline-block; margin: 2px; }
+        .btn-danger { background: var(--danger); color: white; }
+        .btn-success { background: var(--success); color: white; }
+        .badge { padding: 3px 8px; border-radius: 5px; font-size: 12px; background: #2d324d; }
+    </style>
+</head>
+<body>
+
+    <!-- 🔐 بوابة التحقق السرية للمستر أحمد هواش -->
+    <div id="auth-gate">
+        <div class="login-box">
+            <h2 style="color: var(--primary); margin-bottom: 15px;">لوحة تحكم الإدارة 👑</h2>
+            <p style="color: var(--text-muted); margin-bottom: 20px; font-size: 14px;">أدخل كلمة السر الخاصة بالمستر للتحكم بالسيرفر</p>
+            <input type="password" id="admin-password-input" placeholder="اكتب كلمة سر المستر هنا...">
+            <button onclick="verifyAdminPassword()">دخول للوحة التحكم</button>
+            <p id="login-error" style="color: var(--danger); margin-top: 10px; display: none; font-size: 14px;">❌ كلمة السر غير صحيحة!</p>
+        </div>
+    </div>
+
+    <!-- 🌐 الواجهة الرئيسية بعد الدخول الناجح -->
+    <div class="container">
+        <header>
+            <div>
+                <h1>لوحة الإشراف وإدارة المنصة 👑</h1>
+                <p style="color: var(--text-muted); font-size: 14px;">أهلاً بك يا مستر أحمد، تحكم كامل في قاعدة البيانات الحقيقية.</p>
+            </div>
+            <button onclick="location.reload()" style="width: auto; padding: 8px 15px; background: #2d324d; color: #fff;">تحديث البيانات 🔄</button>
+        </header>
+
+        <!-- 📊 العدادات والإحصائيات من الداتابيز -->
+        <div class="stats-grid">
+            <div class="stat-card"><h3>إجمالي الطلاب</h3><p id="stat-students">0</p></div>
+            <div class="stat-card" style="border-color: var(--success);"><h3>إجمالي الأرباح المشحونة</h3><p id="stat-revenue">0 ج.م</p></div>
+            <div class="stat-card" style="border-color: var(--danger);"><h3>الشكاوى وبلاغات البوت</h3><p id="stat-complaints">0</p></div>
+            <div class="stat-card" style="border-color: #9c27b0;"><h3>الصف 1 / 2 / 3</h3><p id="stat-grades">0 / 0 / 0</p></div>
+        </div>
+
+        <div class="grid-sections">
+            <!-- 🎥 نموذج رفع محاضرة جديدة -->
+            <div class="section-card">
+                <h2>رفع محاضرة أو حصة جديدة</h2>
+                <form id="add-course-form" onsubmit="handleCreateCourse(event)">
+                    <input type="text" id="c-title" placeholder="عنوان المحاضرة (مثال: حصة التأسيس الأولى)" required>
+                    <input type="number" id="c-price" placeholder="سعر الحصة بالجنيه (اكتب 0 لو مجانية)" required>
+                    <select id="c-grade" required>
+                        <option value="">اختر الصف الدراسي الموجهة له الحصة</option>
+                        <option value="1">الصف الأول الثانوي</option>
+                        <option value="2">الصف الثاني الثانوي</option>
+                        <option value="3">الصف الثالث الثانوي</option>
+                    </select>
+                    <input type="url" id="c-video" placeholder="رابط فيديو الشرح (YouTube / Vimeo / Drive)">
+                    <input type="url" id="c-pdf" placeholder="رابط مذكرة الشرح أو الواجب PDF">
+                    <button type="submit">نشر وتثبيت الحصة فوراً 🚀</button>
+                </form>
+            </div>
+
+            <!-- 📢 إدارة الإعلانات والشريط المتحرك -->
+            <div class="section-card">
+                <h2>تحديث شريط التنبيهات العاجلة</h2>
+                <textarea id="announcement-text" rows="4" placeholder="اكتب التنبيه اللي هيظهر ويلف أعلى الشاشة عند الطلاب..."></textarea>
+                <select id="announcement-target">
+                    <option value="all">عرض لكل الصفوف</option>
+                    <option value="1">طلاب أولى ثانوي فقط</option>
+                    <option value="2">طلاب تانية ثانوي فقط</option>
+                    <option value="3">طلاب تالتة ثانوي فقط</option>
+                </select>
+                <button onclick="handleUpdateAnnouncement()">نشر التنبيه العام 📢</button>
+            </div>
+        </div>
+
+        <!-- 💳 طلبات الشحن المعلقة (فودافون كاش) -->
+        <div class="data-table-container">
+            <h2 style="color: var(--primary); margin-bottom: 15px; font-size: 18px;">💳 طلبات شحن المحفظة المعلقة (تنتظر موافقتك)</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>اسم الطالب</th>
+                        <th>رقم التحويل</th>
+                        <th>المبلغ</th>
+                        <th>التحكم والأكشن</th>
+                    </tr>
+                </thead>
+                <tbody id="payments-table-body">
+                    <tr><td colspan="4" style="text-align: center; color: var(--text-muted);">جاري تحميل طلبات الشحن...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 👥 إدارة الطلاب المسجلين بالكامل -->
+        <div class="data-table-container">
+            <h2 style="color: var(--primary); margin-bottom: 15px; font-size: 18px;">👥 كشف حساب وإدارة الطلاب المشتركين</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>الاسم</th>
+                        <th>البريد الإلكتروني</th>
+                        <th>الهاتف</th>
+                        <th>الصف</th>
+                        <th>المحفظة</th>
+                        <th>الحالة</th>
+                        <th>إجراءات إدارية</th>
+                    </tr>
+                </thead>
+                <tbody id="students-table-body">
+                    <tr><td colspan="7" style="text-align: center; color: var(--text-muted);">جاري تحميل كشف الطلاب...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 📬 الشكاوى الواردة من الشات بوت -->
+        <div class="data-table-container">
+            <h2 style="color: var(--primary); margin-bottom: 15px; font-size: 18px;">📬 الشكاوى والبلاغات المستلمة من الشات بوت</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>الطالب</th>
+                        <th>الهاتف</th>
+                        <th>تفاصيل الشكوى والرسالة</th>
+                        <th>أكشن</th>
+                    </tr>
+                </thead>
+                <tbody id="complaints-table-body">
+                    <tr><td colspan="4" style="text-align: center; color: var(--text-muted);">لا توجد شكاوى حالياً.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- 🛠️ العمليات البرمجية وربط الأزرار بالسيرفر -->
+    <script>
+        // ⚠️ غيّر هذا الرابط برابط سيرفرك الفعلي على Railway إذا قمت بعمل Deploy
+        const API_URL = "http://localhost:3000"; 
+        let adminPassword = "";
+
+        function verifyAdminPassword() {
+            const pass = document.getElementById('admin-password-input').value;
+            if (pass === "MmAa@2006Rr") {
+                adminPassword = pass;
+                document.getElementById('auth-gate').style.display = 'none';
+                loadDashboardData();
+            } else {
+                document.getElementById('login-error').style.display = 'block';
+            }
+        }
+
+        async function loadDashboardData() {
+            try {
+                // 1. جلب الإحصائيات
+                const statsRes = await fetch(`${API_URL}/api/admin/stats`);
+                const stats = await statsRes.json();
+                document.getElementById('stat-students').innerText = stats.totalStudents;
+                document.getElementById('stat-revenue').innerText = `${stats.revenue} ج.م`;
+                document.getElementById('stat-complaints').innerText = stats.complaints;
+                document.getElementById('stat-grades').innerText = `${stats.grade1} / ${stats.grade2} / ${stats.grade3}`;
+
+                // 2. جلب طلبات الشحن
+                const payRes = await fetch(`${API_URL}/api/admin/payments/pending`);
+                const payments = await payRes.json();
+                const payBody = document.getElementById('payments-table-body');
+                payBody.innerHTML = payments.length === 0 ? `<tr><td colspan="4" style="text-align: center; color: var(--text-muted);">🎉 لا توجد طلبات معلقة حالياً</td></tr>` : '';
+                payments.forEach(p => {
+                    payBody.innerHTML += `
+                        <tr>
+                            <td><b>${p.studentName}</b></td>
+                            <td><span class="badge">${p.phone}</span></td>
+                            <td style="color: var(--success); font-weight: bold;">${p.amount} ج.م</td>
+                            <td>
+                                <button class="btn-sm btn-success" onclick="handlePaymentDecision(${p._id}, true)">قبول وإضافة الرصيد ✅</button>
+                                <button class="btn-sm btn-danger" onclick="handlePaymentDecision(${p._id}, false)">رفض الطلب ❌</button>
+                            </td>
+                        </tr>
+                    `;
+                });
+
+                // 3. جلب الطلاب
+                const stuRes = await fetch(`${API_URL}/api/admin/students`);
+                const students = await stuRes.json();
+                const stuBody = document.getElementById('students-table-body');
+                stuBody.innerHTML = '';
+                students.forEach(s => {
+                    stuBody.innerHTML += `
+                        <tr>
+                            <td>${s.name}</td>
+                            <td style="font-size:13px; color: var(--text-muted);">${s.email}</td>
+                            <td>${s.phone}</td>
+                            <td><span class="badge">صف ${s.grade}</span></td>
+                            <td><b style="color: var(--primary);">${s.wallet} ج.م</b></td>
+                            <td>${s.blocked ? '<span style="color: var(--danger)">محظور 🚫</span>' : '<span style="color: var(--success)">نشط  🟢</span>'}</td>
+                            <td>
+                                <button class="btn-sm" onclick="handleEditWallet(${s._id}, ${s.wallet})">تعديل المحفظة 💰</button>
+                                <button class="btn-sm ${s.blocked ? 'btn-success' : 'btn-danger'}" onclick="handleToggleBlock(${s._id}, ${s.blocked})">
+                                    ${s.blocked ? 'فك الحظر' : 'حظر الطالب'}
+                                </button>
+                                <button class="btn-sm btn-danger" onclick="handleDeleteStudent(${s._id})">حذف 🗑️</button>
+                            </td>
+                        </tr>
+                    `;
+                });
+
+                // 4. جلب الشكاوى
+                const compRes = await fetch(`${API_URL}/api/complaints`);
+                const complaints = await compRes.json();
+                const compBody = document.getElementById('complaints-table-body');
+                compBody.innerHTML = complaints.length === 0 ? `<tr><td colspan="4" style="text-align: center; color: var(--text-muted);">لا توجد شكاوى واردة.</td></tr>` : '';
+                complaints.forEach(c => {
+                    compBody.innerHTML += `
+                        <tr>
+                            <td><b>${c.student_name}</b></td>
+                            <td>${c.phone_number}</td>
+                            <td style="color: var(--text-muted); font-size: 14px;">${c.details}</td>
+                            <td><button class="btn-sm btn-danger" onclick="handleDeleteComplaint(${c._id})">حذف الشكوى 🗑️</button></td>
+                        </tr>
+                    `;
+                });
+
+            } catch (err) {
+                console.error("خطأ أثناء جلب البيانات من السيرفر:", err);
+            }
+        }
+
+        // الأكشنز والطلبات التفاعلية للسيرفر
+        async function handleCreateCourse(e) {
+            e.preventDefault();
+            const body = {
+                title: document.getElementById('c-title').value,
+                price: parseInt(document.getElementById('c-price').value),
+                grade: document.getElementById('c-grade').value,
+                videoUrl: document.getElementById('c-video').value,
+                pdfUrl: document.getElementById('c-pdf').value
+            };
+            const res = await fetch(`${API_URL}/api/courses`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+            });
+            if(res.ok) { alert("✅ تم نشر المحاضرة بنجاح وتخزينها بالداتابيز!"); document.getElementById('add-course-form').reset(); loadDashboardData(); }
+        }
+
+        async function handleUpdateAnnouncement() {
+            const text = document.getElementById('announcement-text').value;
+            const target = document.getElementById('announcement-target').value;
+            if(!text) return alert("من فضلك اكتب نص التنبيه أولاً");
+            const res = await fetch(`${API_URL}/api/announcements`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, target })
+            });
+            if(res.ok) { alert("✅ تم تحديث الشريط التنبيهي في المنصة!"); document.getElementById('announcement-text').value = ''; }
+        }
+
+        async function handlePaymentDecision(id, approve) {
+            const res = await fetch(`${API_URL}/api/admin/payments/${id}/decision`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ approve })
+            });
+            if(res.ok) { alert(approve ? "✅ تم شحن رصيد الطالب والموافقة بنجاح!" : "❌ تم رفض طلب الشحن بنجاح"); loadDashboardData(); }
+        }
+
+        async function handleEditWallet(id, currentWallet) {
+            const newWallet = prompt("أدخل قيمة رصيد المحفظة الجديد:", currentWallet);
+            if (newWallet === null) return;
+            const res = await fetch(`${API_URL}/api/admin/students/${id}/wallet`, {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ wallet: parseInt(newWallet) })
+            });
+            if(res.ok) { alert("💰 تم تحديث رصيد الطالب في قاعدة البيانات!"); loadDashboardData(); }
+        }
+
+        async function handleToggleBlock(id, currentBlock) {
+            const res = await fetch(`${API_URL}/api/admin/students/${id}/block`, {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ blocked: !currentBlock })
+            });
+            if(res.ok) { alert("🔄 تم تحديث حالة الحظر للطالب!"); loadDashboardData(); }
+        }
+
+        async function handleDeleteStudent(id) {
+            if(!confirm("⚠️ هل أنت متأكد من حذف الطالب نهائياً من السيستم؟ لا يمكن التراجع!")) return;
+            const res = await fetch(`${API_URL}/api/admin/students/${id}`, { method: 'DELETE' });
+            if(res.ok) { alert("🗑️ تم مسح الطالب من السيستم"); loadDashboardData(); }
+        }
+
+        async function handleDeleteComplaint(id) {
+            const res = await fetch(`${API_URL}/api/complaints/${id}`, { method: 'DELETE' });
+            if(res.ok) { alert("🗑️ تم حذف الشكوى."); loadDashboardData(); }
+        }
+    </script>
+</body>
+</html>
