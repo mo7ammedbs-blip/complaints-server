@@ -1,24 +1,25 @@
 /**
- * Hawash Academy - Multi-Teacher Enterprise Backend
- * Hardened / production-oriented version.
+ * Hawash Academy - Multi-Teacher Enterprise Backend (MySQL edition)
  *
- * Changes vs. the original draft (see README.md for full list):
- *  - No hardcoded secrets / DB URIs — fails fast if env vars are missing
- *  - Restricted CORS (explicit origin whitelist)
- *  - Helmet security headers + rate limiting on sensitive routes
- *  - Centralized async error handling that never leaks internals to clients
+ * Same hardening as the MongoDB version, ported to MySQL via mysql2:
+ *  - No hardcoded secrets — fails fast if env vars are missing
+ *  - Restricted CORS + Helmet + rate limiting
+ *  - Centralized async error handling that never leaks internals
  *  - Input validation on every mutating route (express-validator)
- *  - Role-based authorization helper (authorizeRoles)
- *  - Purchase flow wrapped in a MongoDB transaction (atomic wallet debit + ledger)
- *  - Complaints endpoint requires auth; studentId derived from the token, not the body
+ *  - Role-based authorization helper
+ *  - Purchase flow wrapped in a real SQL transaction with row locking
+ *    (SELECT ... FOR UPDATE) to prevent double-spend / race conditions
+ *  - Complaints endpoint requires auth; student_id comes from the token
  *  - Pagination on list endpoints
- *  - Passwords never selected/returned by default
- *  - Teacher approval workflow exposed to super_admin
+ *  - Passwords never returned in API responses
+ *  - Teacher approval workflow
  *  - Graceful shutdown
+ *
+ * Run schema.sql against your MySQL database before starting this server.
  */
 
 const express = require('express');
-const mongoose = require('mongoose');
+const mysql = require('mysql2/promise');
 const cors = require('cors');
 const helmet = require('helmet');
 const jwt = require('jsonwebtoken');
@@ -27,8 +28,7 @@ const rateLimit = require('express-rate-limit');
 const { body, param, query, validationResult } = require('express-validator');
 
 // ================= ENVIRONMENT VALIDATION =================
-// Fail fast on boot rather than silently running with insecure defaults.
-const REQUIRED_ENV_VARS = ['JWT_SECRET', 'MONGO_URI'];
+const REQUIRED_ENV_VARS = ['JWT_SECRET', 'DB_HOST', 'DB_USER', 'DB_NAME'];
 const missingEnvVars = REQUIRED_ENV_VARS.filter((key) => !process.env[key]);
 
 if (missingEnvVars.length > 0) {
@@ -40,7 +40,6 @@ if (missingEnvVars.length > 0) {
 }
 
 const JWT_SECRET = process.env.JWT_SECRET;
-const MONGO_URI = process.env.MONGO_URI;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const PORT = process.env.PORT || 5000;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
@@ -48,6 +47,31 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .map((o) => o.trim())
   .filter(Boolean);
 const BCRYPT_SALT_ROUNDS = 12;
+
+// ================= DATABASE POOL =================
+const pool = mysql.createPool({
+  host: process.env.DB_HOST,
+  port: process.env.DB_PORT || 3306,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD || '',
+  database: process.env.DB_NAME,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+  decimalNumbers: true, // return DECIMAL columns as JS numbers, not strings
+});
+
+// Fail fast if the DB is unreachable at boot.
+pool
+  .getConnection()
+  .then((conn) => {
+    console.log('[DB] Connected to MySQL');
+    conn.release();
+  })
+  .catch((err) => {
+    console.error('[DB] Connection error:', err.message);
+    process.exit(1);
+  });
 
 // ================= APP SETUP =================
 const app = express();
@@ -57,7 +81,6 @@ app.use(express.json({ limit: '1mb' }));
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow non-browser requests (no origin header) and whitelisted origins only.
       if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) {
         return callback(null, true);
       }
@@ -67,7 +90,6 @@ app.use(
   })
 );
 
-// Generic rate limiter for the whole API
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 300,
@@ -76,7 +98,6 @@ const generalLimiter = rateLimit({
 });
 app.use(generalLimiter);
 
-// Stricter limiter for auth endpoints (brute-force protection)
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
@@ -85,101 +106,10 @@ const authLimiter = rateLimit({
   message: { error: 'Too many attempts. Please try again later.' },
 });
 
-// ================= DATABASE CONNECTION =================
-mongoose
-  .connect(MONGO_URI)
-  .then(() => console.log('[DB] Connected to Multi-Teacher Enterprise DB'))
-  .catch((err) => {
-    console.error('[DB] Connection error:', err.message);
-    process.exit(1);
-  });
-
-// ================= SCHEMAS & MODELS =================
-
-const userSchema = new mongoose.Schema({
-  name: { type: String, required: true, trim: true },
-  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
-  phone: { type: String, required: true, trim: true },
-  password: { type: String, required: true, select: false },
-  role: { type: String, enum: ['student', 'teacher', 'super_admin'], default: 'student' },
-  grade: { type: String, enum: ['1sec', '2sec', '3sec', null], default: null },
-  walletBalance: { type: Number, default: 0, min: 0 },
-  isApproved: { type: Boolean, default: true },
-  isBlocked: { type: Boolean, default: false },
-  createdAt: { type: Date, default: Date.now },
-});
-const User = mongoose.model('User', userSchema);
-
-const teacherProfileSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
-  subject: { type: String, required: true, trim: true },
-  bio: { type: String, default: '' },
-  platformCommissionRate: { type: Number, default: 20, min: 0, max: 100 },
-  totalEarnings: { type: Number, default: 0, min: 0 },
-});
-const TeacherProfile = mongoose.model('TeacherProfile', teacherProfileSchema);
-
-const courseSchema = new mongoose.Schema({
-  title: { type: String, required: true, trim: true },
-  subject: { type: String, required: true, trim: true, index: true },
-  grade: { type: String, required: true, enum: ['1sec', '2sec', '3sec'], index: true },
-  price: { type: Number, required: true, min: 0 },
-  videoUrl: { type: String, required: true },
-  pdfUrl: { type: String, default: '' },
-  teacherId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  isLocked: { type: Boolean, default: false },
-  createdAt: { type: Date, default: Date.now },
-});
-const Course = mongoose.model('Course', courseSchema);
-
-const purchaseSchema = new mongoose.Schema({
-  studentId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  courseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Course', required: true },
-  teacherId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  pricePaid: { type: Number, required: true, min: 0 },
-  platformFee: { type: Number, required: true, min: 0 },
-  teacherNet: { type: Number, required: true, min: 0 },
-  purchasedAt: { type: Date, default: Date.now },
-});
-// A student can only buy the same course once.
-purchaseSchema.index({ studentId: 1, courseId: 1 }, { unique: true });
-const Purchase = mongoose.model('Purchase', purchaseSchema);
-
-const paymentSchema = new mongoose.Schema({
-  studentId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  amount: { type: Number, required: true, min: 1 },
-  senderPhone: { type: String, required: true, trim: true },
-  status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
-  createdAt: { type: Date, default: Date.now },
-});
-const Payment = mongoose.model('Payment', paymentSchema);
-
-const complaintSchema = new mongoose.Schema({
-  studentId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  issueType: { type: String, required: true, enum: ['technical', 'academic', 'payment'] },
-  teacherId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  details: { type: String, required: true, trim: true, maxlength: 2000 },
-  status: { type: String, enum: ['open', 'resolved'], default: 'open' },
-  createdAt: { type: Date, default: Date.now },
-});
-const Complaint = mongoose.model('Complaint', complaintSchema);
-
-const announcementSchema = new mongoose.Schema({
-  title: { type: String, required: true, trim: true },
-  content: { type: String, required: true, trim: true },
-  targetAudience: { type: String, default: 'all', enum: ['all', '1sec', '2sec', '3sec'] },
-  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  createdAt: { type: Date, default: Date.now },
-});
-const Announcement = mongoose.model('Announcement', announcementSchema);
-
 // ================= HELPERS =================
 
-// Wraps async route handlers so thrown errors reach the centralized error handler
-// instead of crashing the process or requiring try/catch in every route.
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-// Turns express-validator results into a 400 response; place after validation chains.
 const handleValidation = (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -191,7 +121,7 @@ const handleValidation = (req, res, next) => {
 const paginate = (req) => {
   const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
-  return { page, limit, skip: (page - 1) * limit };
+  return { page, limit, offset: (page - 1) * limit };
 };
 
 // ================= MIDDLEWARES =================
@@ -231,21 +161,37 @@ app.post(
   ],
   handleValidation,
   asyncHandler(async (req, res) => {
-    const { name, email, phone, password, role = 'student', grade, subject } = req.body;
+    const { name, email, phone, password, role = 'student', grade = null, subject } = req.body;
 
-    const existing = await User.findOne({ email });
-    if (existing) return res.status(409).json({ error: 'Email already registered' });
+    const [existingRows] = await pool.query('SELECT id FROM users WHERE email = ? LIMIT 1', [email]);
+    if (existingRows.length > 0) return res.status(409).json({ error: 'Email already registered' });
 
     const hashedPassword = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
-    // Teachers require manual approval before they can log in.
     const isApproved = role === 'teacher' ? false : true;
 
-    const user = new User({ name, email, phone, password: hashedPassword, role, grade, isApproved });
-    await user.save();
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
 
-    if (role === 'teacher') {
-      const teacherProfile = new TeacherProfile({ userId: user._id, subject: subject || 'General' });
-      await teacherProfile.save();
+      const [result] = await conn.query(
+        `INSERT INTO users (name, email, phone, password, role, grade, is_approved)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [name, email, phone, hashedPassword, role, role === 'student' ? grade : null, isApproved]
+      );
+
+      if (role === 'teacher') {
+        await conn.query(`INSERT INTO teacher_profiles (user_id, subject) VALUES (?, ?)`, [
+          result.insertId,
+          subject || 'General',
+        ]);
+      }
+
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
     }
 
     res.status(201).json({
@@ -268,25 +214,23 @@ app.post(
   asyncHandler(async (req, res) => {
     const { email, password } = req.body;
 
-    // Explicitly select password since the schema excludes it by default.
-    const user = await User.findOne({ email }).select('+password');
+    const [rows] = await pool.query('SELECT * FROM users WHERE email = ? LIMIT 1', [email]);
+    const user = rows[0];
 
-    // Use a generic message for both "not found" and "wrong password" to avoid
-    // leaking which emails are registered.
     if (!user) return res.status(401).json({ error: 'Invalid email or password' });
-    if (user.isBlocked) return res.status(403).json({ error: 'Account is suspended' });
+    if (user.is_blocked) return res.status(403).json({ error: 'Account is suspended' });
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(401).json({ error: 'Invalid email or password' });
-    if (!user.isApproved) return res.status(403).json({ error: 'Teacher account pending approval' });
+    if (!user.is_approved) return res.status(403).json({ error: 'Teacher account pending approval' });
 
-    const token = jwt.sign({ id: user._id, role: user.role, name: user.name }, JWT_SECRET, {
+    const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, JWT_SECRET, {
       expiresIn: '7d',
     });
 
     res.json({
       token,
-      user: { id: user._id, name: user.name, role: user.role, balance: user.walletBalance },
+      user: { id: user.id, name: user.name, role: user.role, balance: user.wallet_balance },
     });
   })
 );
@@ -298,24 +242,44 @@ app.get(
   [
     query('subject').optional().trim(),
     query('grade').optional().isIn(['1sec', '2sec', '3sec']),
-    query('teacherId').optional().isMongoId(),
+    query('teacherId').optional().isInt(),
   ],
   handleValidation,
   asyncHandler(async (req, res) => {
     const { subject, grade, teacherId } = req.query;
-    const { page, limit, skip } = paginate(req);
+    const { page, limit, offset } = paginate(req);
 
-    const filter = {};
-    if (subject) filter.subject = subject;
-    if (grade) filter.grade = grade;
-    if (teacherId) filter.teacherId = teacherId;
+    const conditions = [];
+    const params = [];
+    if (subject) {
+      conditions.push('c.subject = ?');
+      params.push(subject);
+    }
+    if (grade) {
+      conditions.push('c.grade = ?');
+      params.push(grade);
+    }
+    if (teacherId) {
+      conditions.push('c.teacher_id = ?');
+      params.push(teacherId);
+    }
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const [courses, total] = await Promise.all([
-      Course.find(filter).populate('teacherId', 'name').skip(skip).limit(limit).sort({ createdAt: -1 }),
-      Course.countDocuments(filter),
-    ]);
+    const [rows] = await pool.query(
+      `SELECT c.*, u.name AS teacher_name
+       FROM courses c
+       JOIN users u ON u.id = c.teacher_id
+       ${whereClause}
+       ORDER BY c.created_at DESC
+       LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    );
+    const [[{ total }]] = await pool.query(
+      `SELECT COUNT(*) AS total FROM courses c ${whereClause}`,
+      params
+    );
 
-    res.json({ data: courses, page, limit, total, totalPages: Math.ceil(total / limit) });
+    res.json({ data: rows, page, limit, total, totalPages: Math.ceil(total / limit) });
   })
 );
 
@@ -333,10 +297,16 @@ app.post(
   ],
   handleValidation,
   asyncHandler(async (req, res) => {
-    const { title, subject, grade, price, videoUrl, pdfUrl } = req.body;
-    const course = new Course({ title, subject, grade, price, videoUrl, pdfUrl, teacherId: req.user.id });
-    await course.save();
-    res.status(201).json({ message: 'Course created successfully', course });
+    const { title, subject, grade, price, videoUrl, pdfUrl = '' } = req.body;
+
+    const [result] = await pool.query(
+      `INSERT INTO courses (title, subject, grade, price, video_url, pdf_url, teacher_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [title, subject, grade, price, videoUrl, pdfUrl, req.user.id]
+    );
+
+    const [rows] = await pool.query('SELECT * FROM courses WHERE id = ?', [result.insertId]);
+    res.status(201).json({ message: 'Course created successfully', course: rows[0] });
   })
 );
 
@@ -346,73 +316,72 @@ app.post(
   '/api/student/buy-course',
   authenticateToken,
   authorizeRoles('student'),
-  [body('courseId').isMongoId().withMessage('Valid courseId required')],
+  [body('courseId').isInt().withMessage('Valid courseId required')],
   handleValidation,
   asyncHandler(async (req, res) => {
     const { courseId } = req.body;
+    const conn = await pool.getConnection();
 
-    // Wrap the whole debit + ledger + earnings update in a transaction so a
-    // failure partway through can never leave the wallet debited without a
-    // matching purchase record (or vice versa).
-    const session = await mongoose.startSession();
     try {
-      let responsePayload;
+      await conn.beginTransaction();
 
-      await session.withTransaction(async () => {
-        const course = await Course.findById(courseId).session(session);
-        if (!course) {
-          throw Object.assign(new Error('Course not found'), { status: 404 });
-        }
+      // Lock the course row and the student row for the duration of the transaction
+      // so concurrent purchase attempts can't race each other.
+      const [courseRows] = await conn.query('SELECT * FROM courses WHERE id = ? FOR UPDATE', [courseId]);
+      const course = courseRows[0];
+      if (!course) {
+        await conn.rollback();
+        return res.status(404).json({ error: 'Course not found' });
+      }
 
-        const alreadyOwned = await Purchase.findOne({ studentId: req.user.id, courseId }).session(session);
-        if (alreadyOwned) {
-          throw Object.assign(new Error('Course already purchased'), { status: 409 });
-        }
+      const [existingPurchase] = await conn.query(
+        'SELECT id FROM purchases WHERE student_id = ? AND course_id = ? LIMIT 1',
+        [req.user.id, courseId]
+      );
+      if (existingPurchase.length > 0) {
+        await conn.rollback();
+        return res.status(409).json({ error: 'Course already purchased' });
+      }
 
-        // Atomic conditional debit: only succeeds if balance is sufficient,
-        // eliminating the race condition of read-then-write.
-        const student = await User.findOneAndUpdate(
-          { _id: req.user.id, walletBalance: { $gte: course.price } },
-          { $inc: { walletBalance: -course.price } },
-          { new: true, session }
-        );
-        if (!student) {
-          throw Object.assign(new Error('Insufficient wallet balance'), { status: 400 });
-        }
+      const [studentRows] = await conn.query('SELECT * FROM users WHERE id = ? FOR UPDATE', [req.user.id]);
+      const student = studentRows[0];
+      if (!student || student.wallet_balance < course.price) {
+        await conn.rollback();
+        return res.status(400).json({ error: 'Insufficient wallet balance' });
+      }
 
-        const teacherProfile = await TeacherProfile.findOne({ userId: course.teacherId }).session(session);
-        const commRate = teacherProfile ? teacherProfile.platformCommissionRate : 20;
-        const platformFee = Math.round(((course.price * commRate) / 100) * 100) / 100;
-        const teacherNet = Math.round((course.price - platformFee) * 100) / 100;
+      const newBalance = Number((student.wallet_balance - course.price).toFixed(2));
+      await conn.query('UPDATE users SET wallet_balance = ? WHERE id = ?', [newBalance, student.id]);
 
-        if (teacherProfile) {
-          teacherProfile.totalEarnings += teacherNet;
-          await teacherProfile.save({ session });
-        }
+      const [teacherProfileRows] = await conn.query(
+        'SELECT * FROM teacher_profiles WHERE user_id = ? FOR UPDATE',
+        [course.teacher_id]
+      );
+      const teacherProfile = teacherProfileRows[0];
+      const commRate = teacherProfile ? teacherProfile.platform_commission_rate : 20;
+      const platformFee = Number(((course.price * commRate) / 100).toFixed(2));
+      const teacherNet = Number((course.price - platformFee).toFixed(2));
 
-        await Purchase.create(
-          [
-            {
-              studentId: student._id,
-              courseId: course._id,
-              teacherId: course.teacherId,
-              pricePaid: course.price,
-              platformFee,
-              teacherNet,
-            },
-          ],
-          { session }
-        );
+      if (teacherProfile) {
+        await conn.query('UPDATE teacher_profiles SET total_earnings = total_earnings + ? WHERE user_id = ?', [
+          teacherNet,
+          course.teacher_id,
+        ]);
+      }
 
-        responsePayload = { message: 'Purchase successful', remainingBalance: student.walletBalance };
-      });
+      await conn.query(
+        `INSERT INTO purchases (student_id, course_id, teacher_id, price_paid, platform_fee, teacher_net)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [student.id, course.id, course.teacher_id, course.price, platformFee, teacherNet]
+      );
 
-      res.json(responsePayload);
+      await conn.commit();
+      res.json({ message: 'Purchase successful', remainingBalance: newBalance });
     } catch (err) {
-      if (err.status) return res.status(err.status).json({ error: err.message });
+      await conn.rollback();
       throw err;
     } finally {
-      session.endSession();
+      conn.release();
     }
   })
 );
@@ -428,8 +397,11 @@ app.post(
   handleValidation,
   asyncHandler(async (req, res) => {
     const { amount, senderPhone } = req.body;
-    const payment = new Payment({ studentId: req.user.id, amount, senderPhone });
-    await payment.save();
+    await pool.query('INSERT INTO payments (student_id, amount, sender_phone) VALUES (?, ?, ?)', [
+      req.user.id,
+      amount,
+      senderPhone,
+    ]);
     res.status(201).json({ message: 'Recharge request submitted for review' });
   })
 );
@@ -439,45 +411,48 @@ app.put(
   '/api/admin/payments/:id/review',
   authenticateToken,
   authorizeRoles('super_admin'),
-  [param('id').isMongoId(), body('decision').isIn(['approved', 'rejected'])],
+  [param('id').isInt(), body('decision').isIn(['approved', 'rejected'])],
   handleValidation,
   asyncHandler(async (req, res) => {
     const { decision } = req.body;
+    const conn = await pool.getConnection();
 
-    const session = await mongoose.startSession();
     try {
-      await session.withTransaction(async () => {
-        const payment = await Payment.findById(req.params.id).session(session);
-        if (!payment) throw Object.assign(new Error('Payment not found'), { status: 404 });
-        if (payment.status !== 'pending') {
-          throw Object.assign(new Error('Payment already reviewed'), { status: 409 });
-        }
+      await conn.beginTransaction();
 
-        payment.status = decision;
-        await payment.save({ session });
+      const [rows] = await conn.query('SELECT * FROM payments WHERE id = ? FOR UPDATE', [req.params.id]);
+      const payment = rows[0];
+      if (!payment) {
+        await conn.rollback();
+        return res.status(404).json({ error: 'Payment not found' });
+      }
+      if (payment.status !== 'pending') {
+        await conn.rollback();
+        return res.status(409).json({ error: 'Payment already reviewed' });
+      }
 
-        if (decision === 'approved') {
-          await User.findByIdAndUpdate(
-            payment.studentId,
-            { $inc: { walletBalance: payment.amount } },
-            { session }
-          );
-        }
-      });
+      await conn.query('UPDATE payments SET status = ? WHERE id = ?', [decision, payment.id]);
+
+      if (decision === 'approved') {
+        await conn.query('UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?', [
+          payment.amount,
+          payment.student_id,
+        ]);
+      }
+
+      await conn.commit();
       res.json({ message: `Payment ${decision}` });
     } catch (err) {
-      if (err.status) return res.status(err.status).json({ error: err.message });
+      await conn.rollback();
       throw err;
     } finally {
-      session.endSession();
+      conn.release();
     }
   })
 );
 
 // ================= COMPLAINTS & CHATBOT API =================
 
-// Requires auth: studentId always comes from the verified token, never the body,
-// so no one can file complaints on another student's behalf.
 app.post(
   '/api/complaints',
   authenticateToken,
@@ -485,13 +460,15 @@ app.post(
   [
     body('issueType').isIn(['technical', 'academic', 'payment']),
     body('details').trim().notEmpty().isLength({ max: 2000 }),
-    body('teacherId').optional().isMongoId(),
+    body('teacherId').optional().isInt(),
   ],
   handleValidation,
   asyncHandler(async (req, res) => {
-    const { issueType, details, teacherId } = req.body;
-    const complaint = new Complaint({ studentId: req.user.id, issueType, details, teacherId });
-    await complaint.save();
+    const { issueType, details, teacherId = null } = req.body;
+    await pool.query(
+      `INSERT INTO complaints (student_id, issue_type, details, teacher_id) VALUES (?, ?, ?, ?)`,
+      [req.user.id, issueType, details, teacherId]
+    );
     res.status(201).json({ message: 'Complaint submitted successfully' });
   })
 );
@@ -501,19 +478,26 @@ app.get(
   authenticateToken,
   authorizeRoles('teacher', 'super_admin'),
   asyncHandler(async (req, res) => {
-    const { page, limit, skip } = paginate(req);
-    const filter = req.user.role === 'teacher' ? { teacherId: req.user.id } : {};
+    const { page, limit, offset } = paginate(req);
+    const isTeacher = req.user.role === 'teacher';
+    const whereClause = isTeacher ? 'WHERE co.teacher_id = ?' : '';
+    const params = isTeacher ? [req.user.id] : [];
 
-    const [complaints, total] = await Promise.all([
-      Complaint.find(filter)
-        .populate('studentId', 'name email')
-        .skip(skip)
-        .limit(limit)
-        .sort({ createdAt: -1 }),
-      Complaint.countDocuments(filter),
-    ]);
+    const [rows] = await pool.query(
+      `SELECT co.*, u.name AS student_name, u.email AS student_email
+       FROM complaints co
+       JOIN users u ON u.id = co.student_id
+       ${whereClause}
+       ORDER BY co.created_at DESC
+       LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    );
+    const [[{ total }]] = await pool.query(
+      `SELECT COUNT(*) AS total FROM complaints co ${whereClause}`,
+      params
+    );
 
-    res.json({ data: complaints, page, limit, total, totalPages: Math.ceil(total / limit) });
+    res.json({ data: rows, page, limit, total, totalPages: Math.ceil(total / limit) });
   })
 );
 
@@ -522,12 +506,14 @@ app.get(
 app.get(
   '/api/announcements',
   asyncHandler(async (req, res) => {
-    const { page, limit, skip } = paginate(req);
-    const [announcements, total] = await Promise.all([
-      Announcement.find().sort({ createdAt: -1 }).skip(skip).limit(limit),
-      Announcement.countDocuments(),
-    ]);
-    res.json({ data: announcements, page, limit, total, totalPages: Math.ceil(total / limit) });
+    const { page, limit, offset } = paginate(req);
+    const [rows] = await pool.query(
+      'SELECT * FROM announcements ORDER BY created_at DESC LIMIT ? OFFSET ?',
+      [limit, offset]
+    );
+    const [[{ total }]] = await pool.query('SELECT COUNT(*) AS total FROM announcements');
+
+    res.json({ data: rows, page, limit, total, totalPages: Math.ceil(total / limit) });
   })
 );
 
@@ -542,14 +528,11 @@ app.post(
   ],
   handleValidation,
   asyncHandler(async (req, res) => {
-    const { title, content, targetAudience } = req.body;
-    const announcement = new Announcement({
-      title,
-      content,
-      targetAudience,
-      createdBy: req.user.id,
-    });
-    await announcement.save();
+    const { title, content, targetAudience = 'all' } = req.body;
+    await pool.query(
+      `INSERT INTO announcements (title, content, target_audience, created_by) VALUES (?, ?, ?, ?)`,
+      [title, content, targetAudience, req.user.id]
+    );
     res.status(201).json({ message: 'Announcement published' });
   })
 );
@@ -561,12 +544,15 @@ app.get(
   authenticateToken,
   authorizeRoles('super_admin'),
   asyncHandler(async (req, res) => {
-    const { page, limit, skip } = paginate(req);
-    const [users, total] = await Promise.all([
-      User.find().skip(skip).limit(limit).sort({ createdAt: -1 }), // password excluded by schema default
-      User.countDocuments(),
-    ]);
-    res.json({ data: users, page, limit, total, totalPages: Math.ceil(total / limit) });
+    const { page, limit, offset } = paginate(req);
+    const [rows] = await pool.query(
+      `SELECT id, name, email, phone, role, grade, wallet_balance, is_approved, is_blocked, created_at
+       FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      [limit, offset]
+    );
+    const [[{ total }]] = await pool.query('SELECT COUNT(*) AS total FROM users');
+
+    res.json({ data: rows, page, limit, total, totalPages: Math.ceil(total / limit) });
   })
 );
 
@@ -574,31 +560,32 @@ app.put(
   '/api/admin/users/block/:id',
   authenticateToken,
   authorizeRoles('super_admin'),
-  [param('id').isMongoId()],
+  [param('id').isInt()],
   handleValidation,
   asyncHandler(async (req, res) => {
-    const user = await User.findById(req.params.id);
+    const [rows] = await pool.query('SELECT id, is_blocked FROM users WHERE id = ?', [req.params.id]);
+    const user = rows[0];
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    user.isBlocked = !user.isBlocked;
-    await user.save();
-    res.json({ message: `User block status updated to ${user.isBlocked}` });
+    const newStatus = !user.is_blocked;
+    await pool.query('UPDATE users SET is_blocked = ? WHERE id = ?', [newStatus, user.id]);
+    res.json({ message: `User block status updated to ${newStatus}` });
   })
 );
 
-// New: approve a pending teacher account (closes the gap left by the register flow).
 app.put(
   '/api/admin/teachers/:id/approve',
   authenticateToken,
   authorizeRoles('super_admin'),
-  [param('id').isMongoId()],
+  [param('id').isInt()],
   handleValidation,
   asyncHandler(async (req, res) => {
-    const user = await User.findOne({ _id: req.params.id, role: 'teacher' });
-    if (!user) return res.status(404).json({ error: 'Teacher not found' });
+    const [rows] = await pool.query('SELECT id FROM users WHERE id = ? AND role = "teacher"', [
+      req.params.id,
+    ]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Teacher not found' });
 
-    user.isApproved = true;
-    await user.save();
+    await pool.query('UPDATE users SET is_approved = TRUE WHERE id = ?', [req.params.id]);
     res.json({ message: 'Teacher approved' });
   })
 );
@@ -608,19 +595,18 @@ app.get(
   authenticateToken,
   authorizeRoles('super_admin'),
   asyncHandler(async (req, res) => {
-    const [totalStudents, totalTeachers, revenueAgg] = await Promise.all([
-      User.countDocuments({ role: 'student' }),
-      User.countDocuments({ role: 'teacher' }),
-      Purchase.aggregate([
-        { $group: { _id: null, totalRevenue: { $sum: '$pricePaid' }, platformProfit: { $sum: '$platformFee' } } },
-      ]),
-    ]);
+    const [[{ totalStudents }]] = await pool.query(
+      `SELECT COUNT(*) AS totalStudents FROM users WHERE role = 'student'`
+    );
+    const [[{ totalTeachers }]] = await pool.query(
+      `SELECT COUNT(*) AS totalTeachers FROM users WHERE role = 'teacher'`
+    );
+    const [[revenue]] = await pool.query(
+      `SELECT COALESCE(SUM(price_paid), 0) AS totalRevenue, COALESCE(SUM(platform_fee), 0) AS platformProfit
+       FROM purchases`
+    );
 
-    res.json({
-      totalStudents,
-      totalTeachers,
-      revenue: revenueAgg[0] || { totalRevenue: 0, platformProfit: 0 },
-    });
+    res.json({ totalStudents, totalTeachers, revenue });
   })
 );
 
@@ -630,19 +616,18 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Route not found' });
 });
 
-// Must be declared last, with 4 args, for Express to treat it as an error handler.
-// Never leaks stack traces or raw DB error messages to the client.
 app.use((err, req, res, next) => {
   console.error('[ERROR]', err);
 
   if (err.message === 'Not allowed by CORS') {
     return res.status(403).json({ error: 'Origin not allowed' });
   }
-  if (err.name === 'ValidationError') {
-    return res.status(400).json({ error: 'Invalid data provided' });
-  }
-  if (err.code === 11000) {
+  // MySQL duplicate-entry / FK / data errors -> safe generic messages.
+  if (err.code === 'ER_DUP_ENTRY') {
     return res.status(409).json({ error: 'Duplicate entry' });
+  }
+  if (err.code === 'ER_NO_REFERENCED_ROW' || err.code === 'ER_NO_REFERENCED_ROW_2') {
+    return res.status(400).json({ error: 'Referenced record does not exist' });
   }
 
   const status = err.status || 500;
@@ -659,7 +644,7 @@ const server = app.listen(PORT, () => console.log(`[SERVER] Running on port ${PO
 const shutdown = async (signal) => {
   console.log(`[SERVER] Received ${signal}, shutting down gracefully...`);
   server.close(async () => {
-    await mongoose.connection.close();
+    await pool.end();
     console.log('[SERVER] Closed all connections. Exiting.');
     process.exit(0);
   });
